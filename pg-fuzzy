@@ -1,0 +1,138 @@
+
+#!/usr/bin/env bash
+
+# pg-fuzzy
+# Interactive PostgreSQL database selector
+# Version: 0.1.0
+# License: MIT
+
+set -o pipefail
+
+VERSION="0.1.0"
+MAINTENANCE_DB="${PGFUZZY_MAINTENANCE_DB:-postgres}"
+
+show_help() {
+    cat <<'EOF'
+pg-fuzzy - Interactive PostgreSQL database selector
+
+Usage:
+  pg-fuzzy [OPTION]
+
+Options:
+  -h, --help       Display this help message
+  -v, --version    Display version information
+
+Environment:
+  PGHOST                     PostgreSQL server hostname
+  PGPORT                     PostgreSQL server port
+  PGUSER                     PostgreSQL username
+  PGPASSWORD                 PostgreSQL password
+  PGSSLMODE                  PostgreSQL SSL mode
+  PGFUZZY_MAINTENANCE_DB     Database used for discovery
+                             (default: postgres)
+
+Examples:
+  pg-fuzzy
+
+  PGHOST=localhost PGPORT=5432 pg-fuzzy
+
+  PGHOST=db.example.com PGUSER=developer pg-fuzzy
+EOF
+}
+
+check_dependencies() {
+    local missing=()
+
+    for dependency in psql fzf; do
+        if ! command -v "$dependency" >/dev/null 2>&1; then
+            missing+=("$dependency")
+        fi
+    done
+
+    if ((${#missing[@]})); then
+        printf 'Error: Missing dependencies: %s\n' \
+            "${missing[*]}" >&2
+        return 1
+    fi
+}
+
+main() {
+    case "${1:-}" in
+        -h|--help)
+            show_help
+            return 0
+            ;;
+        -v|--version)
+            printf 'pg-fuzzy %s\n' "$VERSION"
+            return 0
+            ;;
+        "")
+            ;;
+        *)
+            printf 'Error: Unknown option: %s\n' "$1" >&2
+            show_help >&2
+            return 2
+            ;;
+    esac
+
+    check_dependencies || return 1
+
+    local query
+    local databases
+    local selected
+
+    query="
+        SELECT datname
+        FROM pg_database
+        WHERE datallowconn = true
+          AND NOT datistemplate
+          AND has_database_privilege(datname, 'CONNECT')
+        ORDER BY datname;
+    "
+
+    printf 'Discovering PostgreSQL databases...\n' >&2
+
+    if ! databases=$(psql \
+        -X -q -A -t \
+        -d "$MAINTENANCE_DB" \
+        -c "$query"); then
+        printf 'Error: Could not retrieve databases.\n' >&2
+        return 1
+    fi
+
+    if [[ -z "$databases" ]]; then
+        printf 'No connectable databases found.\n' >&2
+        return 0
+    fi
+
+    if selected=$(printf '%s\n' "$databases" |
+        fzf \
+            --prompt="PostgreSQL > " \
+            --height=40% \
+            --reverse \
+            --border \
+            --header="Select a database (Esc to cancel)"); then
+        :
+    else
+        local status=$?
+
+        if ((status == 130 || status == 1)); then
+            printf 'Selection cancelled.\n' >&2
+            return 0
+        fi
+
+        printf 'Error: Database selection failed.\n' >&2
+        return "$status"
+    fi
+
+    if [[ -z "$selected" ]]; then
+        printf 'No database selected.\n' >&2
+        return 0
+    fi
+
+    printf 'Connecting to database: %s\n' "$selected" >&2
+
+    exec psql -X -d "$selected"
+}
+
+main "$@"
